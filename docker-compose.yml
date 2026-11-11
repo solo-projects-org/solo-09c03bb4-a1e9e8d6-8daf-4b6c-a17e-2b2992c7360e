@@ -4,8 +4,14 @@ services:
       context: ./sample-oai
     image: union-catalog/sample-oai:latest
     environment:
-      # 每页 10 条，27 条样例记录分 3 页，便于观察 resumptionToken 翻页
-      PAGE_SIZE: "10"
+      # 模拟成员馆换系统期间积压的大批书目：
+      # 65,536 条不同标识、每页 256 条（共 256 页）、每条 4 KiB dc:description，
+      # datestamp 分布在 2026-10-01 起的 90 天内（约 728 条/天）
+      RECORD_COUNT: "65536"
+      PAGE_SIZE: "256"
+      DESCRIPTION_BYTES: "4096"
+      DELETED_INDEX: "0"
+      DATE_SPAN_DAYS: "90"
       PORT: "8080"
       TOKEN_TTL: "3600"
       BASE_URL: "http://oai-source:8080/oai"
@@ -28,6 +34,9 @@ services:
     environment:
       OAI_ENDPOINT: "http://oai-source:8080/oai"
       APP_DB_PATH: "/data/harvester.db"
+    # 256 MiB 内存上限：采集端按页流式落盘暂存，整批采完才单事务提交
+    mem_limit: 256m
+    memswap_limit: 256m
     ports:
       - "8000:8000"
     volumes:

@@ -8,9 +8,13 @@
   POST     /admin/reset              清除故障开关与过期令牌
 
 环境变量：
-  PAGE_SIZE   每页记录数，默认 10
-  PORT        监听端口，默认 8080
-  TOKEN_TTL   resumptionToken 有效期秒数，默认 3600
+  RECORD_COUNT       样例记录总数，默认 27
+  PAGE_SIZE          每页记录数，默认 10
+  DESCRIPTION_BYTES  每条记录的 dc:description 字节数（ASCII，渲染时按需生成），默认 0（不输出）
+  DELETED_INDEX      第几条记录带删除标记（1 起），默认 13；0 表示没有删除记录
+  DATE_SPAN_DAYS     记录 datestamp 分布的天数窗口（循环取模），默认 0 表示每天一条顺延
+  PORT               监听端口，默认 8080
+  TOKEN_TTL          resumptionToken 有效期秒数，默认 3600
 """
 from __future__ import annotations
 
@@ -36,23 +40,36 @@ ET.register_namespace("dc", DC_NS)
 ET.register_namespace("oai_dc", OAI_DC_NS)
 ET.register_namespace("xsi", XSI_NS)
 
+RECORD_COUNT = int(os.environ.get("RECORD_COUNT", "27"))
 PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "10"))
+DESCRIPTION_BYTES = int(os.environ.get("DESCRIPTION_BYTES", "0"))
+DELETED_INDEX = int(os.environ.get("DELETED_INDEX", "13"))
+DATE_SPAN_DAYS = int(os.environ.get("DATE_SPAN_DAYS", "0"))
 PORT = int(os.environ.get("PORT", "8080"))
 TOKEN_TTL = int(os.environ.get("TOKEN_TTL", "3600"))
 BASE_URL = os.environ.get("BASE_URL", f"http://oai-source:{PORT}/oai")
 
 
-def _build_records() -> list[dict]:
-    """生成 27 条确定性的样例书目，其中 rec-013 为已删除记录。"""
+def _build_records(count: int, deleted_index: int,
+                   date_span_days: int) -> list[dict]:
+    """生成确定性的样例书目。
+
+    dc:description 不存进记录里，而是在渲染时按 DESCRIPTION_BYTES 现算，
+    65,536 条 × 4 KiB 描述也不会让样本源自身占用大批内存。
+    """
     records = []
     start = date(2026, 10, 1)
-    for i in range(1, 28):
-        datestamp = (start + timedelta(days=i - 1)).isoformat()
+    for i in range(1, count + 1):
+        if date_span_days > 0:
+            day_offset = (i - 1) % date_span_days
+        else:
+            day_offset = i - 1
+        datestamp = (start + timedelta(days=day_offset)).isoformat()
         records.append(
             {
                 "identifier": f"oai:sample.lib:rec-{i:03d}",
                 "datestamp": datestamp,
-                "deleted": i == 13,
+                "deleted": i == deleted_index,
                 "title": f"样例书目 {i:03d}：联合目录补采测试记录",
                 "creator": f"测试作者 {i:03d}",
                 "date": datestamp,
@@ -63,7 +80,14 @@ def _build_records() -> list[dict]:
     return records
 
 
-RECORDS = _build_records()
+RECORDS = _build_records(RECORD_COUNT, DELETED_INDEX, DATE_SPAN_DAYS)
+
+
+def _description_text(identifier: str) -> str:
+    """确定性生成恰好 DESCRIPTION_BYTES 字节的 ASCII 简介（UTF-8 下等长）。"""
+    seed = f"Backlog description for {identifier}. "
+    repeats = DESCRIPTION_BYTES // len(seed) + 1
+    return (seed * repeats)[:DESCRIPTION_BYTES]
 
 
 class TokenStore:
@@ -117,6 +141,7 @@ class TokenStore:
             return {
                 "page_size": PAGE_SIZE,
                 "record_count": len(RECORDS),
+                "description_bytes": DESCRIPTION_BYTES,
                 "active_tokens": len(self._tokens),
                 "fail_next_token": self.fail_next_token,
             }
@@ -177,6 +202,10 @@ def _record_element(parent: ET.Element, record: dict) -> None:
         ("type", record["type"]),
     ):
         ET.SubElement(dc_el, f"{{{DC_NS}}}{tag}").text = value
+    if DESCRIPTION_BYTES > 0:
+        ET.SubElement(dc_el, f"{{{DC_NS}}}description").text = (
+            _description_text(record["identifier"])
+        )
 
 
 def _filter_records(from_date: str | None, until_date: str | None) -> list[dict]:
@@ -433,5 +462,9 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"[oai-source] sample OAI-PMH server listening on 0.0.0.0:{PORT}")
-    print(f"[oai-source] page size={PAGE_SIZE}, records={len(RECORDS)}")
+    print(
+        f"[oai-source] records={len(RECORDS)}, page_size={PAGE_SIZE}, "
+        f"description_bytes={DESCRIPTION_BYTES}, "
+        f"deleted_index={DELETED_INDEX}, date_span_days={DATE_SPAN_DAYS}"
+    )
     server.serve_forever()

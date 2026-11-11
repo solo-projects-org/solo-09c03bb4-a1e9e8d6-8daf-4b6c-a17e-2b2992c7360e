@@ -1,13 +1,16 @@
 """故障注入：resumptionToken 永远失效，用于验证整批回滚。
 
 单独放在 scripts/，不进入应用镜像。
+运行：python3 scripts/test_rollback.py
 """
+import os
 import sys
-import types
 
-sys.path.insert(0, "/workspace")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.oai_client import OAIClient, OAIError, OAIPage  # noqa: E402
+from app.oai_client import OAIClient, OAIError, OAIPage, OAIRecord  # noqa: E402
+
+DB_PATH = "/tmp/e2e/data/failtest.db"
 
 
 class FlakyClient(OAIClient):
@@ -16,7 +19,15 @@ class FlakyClient(OAIClient):
 
     def list_records_first(self, *, from_date, until_date):
         return OAIPage(
-            records=[{"fake": True}],  # 占位，模拟首页已取到 10 条
+            records=[
+                OAIRecord(
+                    identifier=f"oai:fake:{i:03d}",
+                    datestamp="2026-10-01",
+                    deleted=False,
+                    dc={"title": [f"占位书目 {i:03d}"]},
+                )
+                for i in range(10)  # 模拟首页已取到 10 条
+            ],
             resumption_token="token-a",
             complete_list_size=27,
             cursor=0,
@@ -28,8 +39,9 @@ class FlakyClient(OAIClient):
 
 from app import db, harvester  # noqa: E402
 
-db.init_db("/tmp/e2e/data/failtest.db")
-before = db.get_last_until(db.get_connection("/tmp/e2e/data/failtest.db"))
+db.DB_PATH = DB_PATH  # 指向临时库，暂存文件也会落在同一目录
+db.init_db(DB_PATH)
+before = db.get_last_until(db.get_connection(DB_PATH))
 print("采集前 last_until:", before)
 
 try:
@@ -39,7 +51,7 @@ try:
 except OAIError as e:
     print("预期失败抛出:", e)
 
-conn = db.get_connection("/tmp/e2e/data/failtest.db")
+conn = db.get_connection(DB_PATH)
 print("采集后 last_until（应仍为 None）:", db.get_last_until(conn))
 print("书目条数（应为 0，半批未入库）:",
       conn.execute("SELECT COUNT(*) FROM bib_records").fetchone()[0])
@@ -48,3 +60,7 @@ run = conn.execute(
 ).fetchone()
 print("最近运行:", dict(run))
 conn.close()
+
+leftovers = [f for f in os.listdir(os.path.dirname(DB_PATH))
+             if f.startswith("harvest-spool-")]
+print("残留暂存文件（应为空）:", leftovers)
